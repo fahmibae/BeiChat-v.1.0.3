@@ -92,7 +92,9 @@ data class MessageEntity(
     val replyToMessageId: Long? = null,
     val replyToSender: String = "",
     val replyToContent: String = "",
-    val reactions: String = "" // e.g. "❤️,👍,🔒"
+    val reactions: String = "", // e.g. "❤️,👍,🔒"
+    val isEdited: Boolean = false,
+    val editedTimestamp: Long = 0L
 )
 
 @Entity(tableName = "linked_devices")

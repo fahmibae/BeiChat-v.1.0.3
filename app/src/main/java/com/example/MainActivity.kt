@@ -118,6 +118,8 @@ fun BitChatApp(
     val isAttachmentSheetOpen by viewModel.isAttachmentSheetOpen.collectAsState()
     val isGroupInfoSheetOpen by viewModel.isGroupInfoSheetOpen.collectAsState()
     val activeMediaViewerMessage by viewModel.activeMediaViewerMessage.collectAsState()
+    val replyingMessage by viewModel.replyingMessage.collectAsState()
+    val editingMessage by viewModel.editingMessage.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -134,8 +136,16 @@ fun BitChatApp(
                     ChatDetailScreen(
                         conversation = targetConv,
                         messages = activeMessages,
+                        totalUnreadCount = totalUnreadCount,
+                        replyingMessage = replyingMessage,
+                        editingMessage = editingMessage,
                         onBack = { viewModel.clearActiveConversation() },
                         onSendMessage = { text -> viewModel.sendMessage(text) },
+                        onStartReply = { msg -> viewModel.startReplyingMessage(msg) },
+                        onCancelReply = { viewModel.cancelReplying() },
+                        onStartEdit = { msg -> viewModel.startEditingMessage(msg) },
+                        onCancelEdit = { viewModel.cancelEditing() },
+                        onDeleteMessage = { msgId -> viewModel.deleteMessage(msgId) },
                         onOpenAttachmentSheet = { viewModel.openAttachmentSheet() },
                         onOpenDisappearingTimerSheet = { viewModel.openDisappearingTimerSheet() },
                         onOpenSafetyNumbersDialog = { viewModel.openSafetyNumberDialog() },

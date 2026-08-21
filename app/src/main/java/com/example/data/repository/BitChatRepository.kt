@@ -195,6 +195,33 @@ class BitChatRepository(
         }
     }
 
+    suspend fun editMessage(messageId: Long, newText: String) {
+        val msg = chatDao.getMessageById(messageId) ?: return
+        val conv = chatDao.getConversationById(msg.conversationId) ?: return
+        val key = CryptoManager.deriveKeyFromSeed(conv.peerPublicKey)
+        val encrypted = CryptoManager.encrypt(newText, key)
+
+        val updated = msg.copy(
+            content = newText,
+            encryptedCipherPayload = encrypted.cipherBase64,
+            ivHex = encrypted.ivHex,
+            isEdited = true,
+            editedTimestamp = System.currentTimeMillis()
+        )
+        chatDao.updateMessage(updated)
+
+        chatDao.updateConversation(
+            conv.copy(
+                lastMessageText = newText,
+                lastMessageTimestamp = System.currentTimeMillis()
+            )
+        )
+    }
+
+    suspend fun deleteMessage(messageId: Long) {
+        chatDao.deleteMessage(messageId)
+    }
+
     suspend fun createGroup(
         title: String,
         description: String,

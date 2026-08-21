@@ -51,6 +51,8 @@ data class BitChatUiState(
     val isAttachmentSheetOpen: Boolean = false,
     val isGroupInfoSheetOpen: Boolean = false,
     val activeHighResMediaMessage: MessageEntity? = null,
+    val replyingMessage: MessageEntity? = null,
+    val editingMessage: MessageEntity? = null,
     val isAppLocked: Boolean = false,
     val isBiometricLockEnabled: Boolean = false,
     val toastMessage: String? = null
@@ -127,6 +129,14 @@ class BitChatViewModel(
 
     val activeMediaViewerMessage: StateFlow<MessageEntity?> = _uiState
         .map { it.activeHighResMediaMessage }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val replyingMessage: StateFlow<MessageEntity?> = _uiState
+        .map { it.replyingMessage }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val editingMessage: StateFlow<MessageEntity?> = _uiState
+        .map { it.editingMessage }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val conversations: StateFlow<List<ConversationEntity>> = combine(
@@ -274,18 +284,34 @@ class BitChatViewModel(
                 isDisappearingTimerSheetOpen = false,
                 isAttachmentSheetOpen = false,
                 isGroupInfoSheetOpen = false,
-                activeHighResMediaMessage = null
+                activeHighResMediaMessage = null,
+                replyingMessage = null,
+                editingMessage = null
             )
         }
     }
 
     fun sendMessage(text: String) {
         val convId = _uiState.value.activeConversationId ?: return
+        val currentEdit = _uiState.value.editingMessage
+        val currentReply = _uiState.value.replyingMessage
+
         viewModelScope.launch {
+            if (currentEdit != null) {
+                repository.editMessage(currentEdit.id, text)
+                _uiState.update { it.copy(editingMessage = null) }
+                return@launch
+            }
+
             repository.sendMessage(
                 conversationId = convId,
-                text = text
+                text = text,
+                replyToId = currentReply?.id,
+                replyToSender = currentReply?.senderName ?: "",
+                replyToContent = currentReply?.content?.ifBlank { currentReply.mediaCaption } ?: ""
             )
+            _uiState.update { it.copy(replyingMessage = null) }
+
             val activeConv = repository.getConversation(convId)
             val recipient = activeConv?.peerPublicKey?.takeIf { it.contains(":") } ?: activeConv?.title ?: "Peer Node"
             
@@ -294,6 +320,28 @@ class BitChatViewModel(
             } else {
                 meshManager.sendOffGridMessage(recipient, text)
             }
+        }
+    }
+
+    fun startReplyingMessage(message: MessageEntity) {
+        _uiState.update { it.copy(replyingMessage = message, editingMessage = null) }
+    }
+
+    fun cancelReplying() {
+        _uiState.update { it.copy(replyingMessage = null) }
+    }
+
+    fun startEditingMessage(message: MessageEntity) {
+        _uiState.update { it.copy(editingMessage = message, replyingMessage = null) }
+    }
+
+    fun cancelEditing() {
+        _uiState.update { it.copy(editingMessage = null) }
+    }
+
+    fun deleteMessage(messageId: Long) {
+        viewModelScope.launch {
+            repository.deleteMessage(messageId)
         }
     }
 

@@ -4,9 +4,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,12 +33,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
@@ -45,6 +53,7 @@ import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -58,6 +67,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -109,13 +119,21 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatDetailScreen(
     conversation: ConversationEntity,
     messages: List<MessageEntity>,
+    totalUnreadCount: Int = 0,
+    replyingMessage: MessageEntity? = null,
+    editingMessage: MessageEntity? = null,
     onBack: () -> Unit,
     onSendMessage: (String) -> Unit,
+    onStartReply: (MessageEntity) -> Unit = {},
+    onCancelReply: () -> Unit = {},
+    onStartEdit: (MessageEntity) -> Unit = {},
+    onCancelEdit: () -> Unit = {},
+    onDeleteMessage: (Long) -> Unit = {},
     onOpenAttachmentSheet: () -> Unit,
     onOpenDisappearingTimerSheet: () -> Unit,
     onOpenSafetyNumbersDialog: () -> Unit,
@@ -125,6 +143,15 @@ fun ChatDetailScreen(
     var inputText by remember { mutableStateOf("") }
     var isMenuOpen by remember { mutableStateOf(false) }
     var isEmojiPickerOpen by remember { mutableStateOf(false) }
+    var selectedActionMessage by remember { mutableStateOf<MessageEntity?>(null) }
+    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+
+    // Sync input text when editing message changes
+    LaunchedEffect(editingMessage) {
+        if (editingMessage != null) {
+            inputText = editingMessage.content
+        }
+    }
 
     val isDark = MaterialTheme.colorScheme.background == Color(0xFF0B0F19)
     val listState = rememberLazyListState()
@@ -156,15 +183,37 @@ fun ChatDetailScreen(
                     .padding(horizontal = 4.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = onBack,
-                    modifier = Modifier.testTag("chat_back_button")
+                // WhatsApp-Style Back Button with unread counter badge
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onBack() }
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Kembali",
-                        tint = MaterialTheme.colorScheme.onSurface
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(24.dp)
                     )
+                    if (totalUnreadCount > 0) {
+                        Surface(
+                            shape = CircleShape,
+                            color = com.example.ui.theme.SleekBluePrimary,
+                            modifier = Modifier
+                                .padding(start = 2.dp, end = 4.dp)
+                                .height(20.dp)
+                        ) {
+                            Text(
+                                text = if (totalUnreadCount > 99) "99+" else totalUnreadCount.toString(),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
 
                 Row(
@@ -363,7 +412,10 @@ fun ChatDetailScreen(
                 MessageBubbleItem(
                     message = message,
                     isGroup = conversation.type == ConversationType.GROUP,
-                    onOpenMediaViewer = onOpenMediaViewer
+                    onOpenMediaViewer = onOpenMediaViewer,
+                    onLongClick = {
+                        selectedActionMessage = message
+                    }
                 )
             }
 
@@ -374,6 +426,135 @@ fun ChatDetailScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     com.example.ui.components.DeviceSyncPillBanner(syncedDeviceCount = 3)
+                }
+            }
+        }
+
+        // WhatsApp-Style Reply Preview Bar
+        AnimatedVisibility(
+            visible = replyingMessage != null,
+            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut()
+        ) {
+            replyingMessage?.let { replyMsg ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 8.dp, bottomEnd = 8.dp),
+                    color = if (isDark) Color(0xFF1E293B) else MaterialTheme.colorScheme.surfaceVariant,
+                    tonalElevation = 2.dp,
+                    border = androidx.compose.foundation.BorderStroke(
+                        0.5.dp,
+                        com.example.ui.theme.SleekBluePrimary.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(36.dp)
+                                .background(com.example.ui.theme.SleekBluePrimary, RoundedCornerShape(2.dp))
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Membalas ${replyMsg.senderName}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = com.example.ui.theme.SleekBluePrimary
+                            )
+                            Text(
+                                text = replyMsg.content.ifBlank { replyMsg.mediaCaption ?: "Lampiran Media" },
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(
+                            onClick = onCancelReply,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Batal Balas",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // WhatsApp-Style Edit Message Bar
+        AnimatedVisibility(
+            visible = editingMessage != null,
+            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut()
+        ) {
+            editingMessage?.let { editMsg ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
+                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 8.dp, bottomEnd = 8.dp),
+                    color = if (isDark) Color(0xFF1E293B) else Color(0xFFFEF3C7),
+                    tonalElevation = 2.dp,
+                    border = androidx.compose.foundation.BorderStroke(
+                        0.5.dp,
+                        Color(0xFFF59E0B)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(36.dp)
+                                .background(Color(0xFFF59E0B), RoundedCornerShape(2.dp))
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Edit Pesan",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD97706)
+                            )
+                            Text(
+                                text = editMsg.content,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                onCancelEdit()
+                                inputText = ""
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Batal Edit",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -426,7 +607,7 @@ fun ChatDetailScreen(
                     ) {
                         if (inputText.isEmpty()) {
                             Text(
-                                text = "Ketik pesan terenkripsi...",
+                                text = if (editingMessage != null) "Edit pesan Anda..." else "Ketik pesan terenkripsi...",
                                 fontSize = 15.sp,
                                 color = if (isDark) Color(0xFF64748B) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                             )
@@ -475,7 +656,7 @@ fun ChatDetailScreen(
                 }
             }
 
-            // WhatsApp Style Floating Round Action Button (Mic / Send FAB)
+            // WhatsApp Style Floating Round Action Button (Mic / Send FAB / Checkmark for Edit)
             Surface(
                 onClick = {
                     if (inputText.isNotBlank()) {
@@ -486,7 +667,7 @@ fun ChatDetailScreen(
                     }
                 },
                 shape = CircleShape,
-                color = com.example.ui.theme.SleekBluePrimary,
+                color = if (editingMessage != null) Color(0xFF10B981) else com.example.ui.theme.SleekBluePrimary,
                 shadowElevation = 3.dp,
                 modifier = Modifier
                     .size(48.dp)
@@ -497,13 +678,149 @@ fun ChatDetailScreen(
                     modifier = Modifier.fillMaxSize()
                 ) {
                     Icon(
-                        imageVector = if (inputText.isNotBlank()) Icons.AutoMirrored.Filled.Send else Icons.Default.Mic,
-                        contentDescription = if (inputText.isNotBlank()) "Kirim" else "Rekam Suara",
+                        imageVector = when {
+                            editingMessage != null -> Icons.Default.Check
+                            inputText.isNotBlank() -> Icons.AutoMirrored.Filled.Send
+                            else -> Icons.Default.Mic
+                        },
+                        contentDescription = if (editingMessage != null) "Simpan Edit" else if (inputText.isNotBlank()) "Kirim" else "Rekam Suara",
                         tint = Color.White,
                         modifier = Modifier.size(22.dp)
                     )
                 }
             }
+        }
+
+        // WhatsApp-Style Long Press Context Menu BottomSheet / Dialog
+        selectedActionMessage?.let { selectedMsg ->
+            val isMyMessage = selectedMsg.isOutgoing
+            AlertDialog(
+                onDismissRequest = { selectedActionMessage = null },
+                containerColor = if (isDark) Color(0xFF1E293B) else MaterialTheme.colorScheme.surface,
+                title = {
+                    Text(
+                        text = "Opsi Pesan",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        // Action 1: Balas (Reply)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    onStartReply(selectedMsg)
+                                    selectedActionMessage = null
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Reply,
+                                contentDescription = "Balas",
+                                tint = com.example.ui.theme.SleekBluePrimary
+                            )
+                            Text(
+                                text = "Balas (Reply)",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        // Action 2: Salin (Copy)
+                        if (selectedMsg.content.isNotBlank()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(selectedMsg.content))
+                                        selectedActionMessage = null
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Salin",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Salin Teks",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        // Action 3: Edit Pesan (Hanya untuk pesan sendiri yang bertipe teks)
+                        if (isMyMessage && selectedMsg.mediaType == MediaType.NONE) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        onStartEdit(selectedMsg)
+                                        selectedActionMessage = null
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "Edit Pesan",
+                                    tint = Color(0xFFF59E0B)
+                                )
+                                Text(
+                                    text = "Edit Pesan",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        // Action 4: Hapus Pesan (Delete)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    onDeleteMessage(selectedMsg.id)
+                                    selectedActionMessage = null
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Hapus Pesan",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                text = "Hapus Pesan",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedActionMessage = null }) {
+                        Text("Tutup")
+                    }
+                }
+            )
         }
 
         if (isEmojiPickerOpen) {
@@ -522,11 +839,13 @@ fun ChatDetailScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageBubbleItem(
     message: MessageEntity,
     isGroup: Boolean,
-    onOpenMediaViewer: (MessageEntity) -> Unit
+    onOpenMediaViewer: (MessageEntity) -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     val isOutgoing = message.isOutgoing
     val alignment = if (isOutgoing) Alignment.End else Alignment.Start
@@ -577,9 +896,57 @@ fun MessageBubbleItem(
         Surface(
             shape = bubbleShape,
             color = bubbleBg,
-            modifier = Modifier.widthIn(max = 310.dp)
+            modifier = Modifier
+                .widthIn(max = 310.dp)
+                .combinedClickable(
+                    onClick = { /* normal click */ },
+                    onLongClick = onLongClick
+                )
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                // Quoted / Reply Preview Box (WhatsApp Style inside Bubble)
+                if (message.replyToSender.isNotBlank() && message.replyToContent.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isDarkTheme) Color(0xFF0F172A).copy(alpha = 0.7f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(28.dp)
+                                    .background(com.example.ui.theme.SleekBluePrimary, RoundedCornerShape(2.dp))
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = message.replyToSender,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = com.example.ui.theme.SleekBluePrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = message.replyToContent,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Media Type Renderers
                 when (message.mediaType) {
                     MediaType.IMAGE_HIGH_RES -> {
@@ -774,6 +1141,16 @@ fun MessageBubbleItem(
                         DisappearingCountdownBadge(
                             expiresAtTimestamp = message.expiresAtTimestamp,
                             modifier = Modifier.padding(end = 6.dp)
+                        )
+                    }
+
+                    if (message.isEdited) {
+                        Text(
+                            text = "diedit",
+                            fontSize = 10.sp,
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(end = 4.dp)
                         )
                     }
 
