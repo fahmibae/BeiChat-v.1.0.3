@@ -23,22 +23,24 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 enum class AppThemeMode {
-    SYSTEM, // Mengikuti Tema Sistem
-    LIGHT,  // Mode Terang
-    DARK    // Mode Gelap
+    SYSTEM,
+    LIGHT,
+    DARK
 }
 
 data class BitChatUiState(
-    val selectedTab: Int = 0, // 0 = Chat, 1 = Mesh P2P Off-Grid, 2 = Perangkat, 3 = Keamanan, 4 = Akun
-    val chatFilter: Int = 0, // 0 = Semua, 1 = Pribadi, 2 = Grup, 3 = Belum Dibaca
+    val selectedTab: Int = 0,
+    val chatFilter: Int = 0,
     val searchQuery: String = "",
     val activeConversationId: String? = null,
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
@@ -58,13 +60,16 @@ class BitChatViewModel(
     application: Application
 ) : AndroidViewModel(application) {
 
-    private val repository = BitChatRepository.getInstance(application)
+    private val chatDao = com.example.data.local.AppDatabase.getDatabase(application).chatDao()
+    private val repository = BitChatRepository(
+        chatDao = chatDao,
+        appScope = viewModelScope
+    )
     private val meshManager = MeshNetworkManager.getInstance(application)
 
     private val _uiState = MutableStateFlow(BitChatUiState())
     val uiState: StateFlow<BitChatUiState> = _uiState.asStateFlow()
 
-    // Mesh Network StateFlows
     val isMeshModeActive: StateFlow<Boolean> = meshManager.isMeshModeEnabled
     val isRadarScanning: StateFlow<Boolean> = meshManager.isRadarScanning
     val meshPeers: StateFlow<List<MeshPeerNode>> = meshManager.activePeers
@@ -72,7 +77,6 @@ class BitChatViewModel(
     val meshSosAlerts: StateFlow<List<MeshSosBroadcast>> = meshManager.sosAlerts
     val meshStats: StateFlow<MeshStats> = meshManager.meshStats
 
-    // Screen StateFlows mapped for clean Compose observation
     val selectedTab: StateFlow<Int> = _uiState
         .map { it.selectedTab }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
@@ -135,10 +139,10 @@ class BitChatViewModel(
                     conv.lastMessageText.contains(state.searchQuery, ignoreCase = true)
 
             val matchesFilter = when (state.chatFilter) {
-                0 -> true // Semua
-                1 -> conv.type == ConversationType.DIRECT // Pribadi
-                2 -> conv.type == ConversationType.GROUP // Grup
-                3 -> conv.unreadCount > 0 // Belum Dibaca
+                0 -> true
+                1 -> conv.type == ConversationType.DIRECT
+                2 -> conv.type == ConversationType.GROUP
+                3 -> conv.unreadCount > 0
                 else -> true
             }
 
@@ -146,9 +150,9 @@ class BitChatViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val totalUnreadCount: StateFlow<Int> = repository.allConversations
-        .map { convs -> convs.sumOf { it.unreadCount } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val totalUnreadCount: StateFlow<Int> = conversations.map { list ->
+        list.sumOf { it.unreadCount }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val activeConversation: StateFlow<ConversationEntity?> = _uiState
         .flatMapLatest { state ->
@@ -171,23 +175,74 @@ class BitChatViewModel(
     val linkedDevices: StateFlow<List<LinkedDeviceEntity>> = repository.allLinkedDevices
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val securityLogs: StateFlow<List<SecurityLogEntity>> = repository.securityLogs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val contacts: StateFlow<List<ContactEntity>> = repository.allContacts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val securityLogs: StateFlow<List<SecurityLogEntity>> = repository.securityLogs
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    init {
+        observeIncomingPhysicalMeshMessages()
+    }
+
+    private fun observeIncomingPhysicalMeshMessages() {
+        viewModelScope.launch {
+            meshManager.incomingMeshMessages.collect { payload ->
+                val senderTitle = payload.senderName.ifBlank { "Node Sekitar (${payload.senderAddress.takeLast(4)})" }
+                val allConvs = repository.allConversations.first()
+                val existing = allConvs.find { it.title.equals(senderTitle, ignoreCase = true) || it.peerPublicKey == payload.senderAddress }
+
+                val convId = if (existing != null) {
+                    existing.id
+                } else {
+                    val newConv = ConversationEntity(
+                        id = "mesh_${UUID.randomUUID().toString().take(8)}",
+                        type = if (payload.isBroadcast) ConversationType.GROUP else ConversationType.DIRECT,
+                        title = senderTitle,
+                        peerPublicKey = payload.senderAddress.ifBlank { "PUB_BLE_${UUID.randomUUID().toString().take(6)}" },
+                        avatarColorHex = "#3B82F6",
+                        avatarInitials = senderTitle.take(2).uppercase(),
+                        lastMessageText = payload.messageText,
+                        lastMessageTimestamp = payload.timestamp,
+                        isVerified = true
+                    )
+                    repository.insertConversation(newConv)
+                    newConv.id
+                }
+
+                val key = CryptoManager.deriveKeyFromSeed(payload.senderAddress.ifBlank { "BITCHAT_SECRET" })
+                val encrypted = CryptoManager.encrypt(payload.messageText, key)
+
+                val incomingMsg = MessageEntity(
+                    conversationId = convId,
+                    senderId = payload.senderAddress.ifBlank { "peer_$convId" },
+                    senderName = senderTitle,
+                    content = payload.messageText,
+                    encryptedCipherPayload = encrypted.cipherBase64,
+                    ivHex = encrypted.ivHex,
+                    timestamp = payload.timestamp,
+                    status = com.example.data.model.MessageStatus.READ,
+                    isOutgoing = false,
+                    mediaType = MediaType.NONE
+                )
+                chatDao.insertMessage(incomingMsg)
+            }
+        }
+    }
 
     fun selectTab(index: Int) {
         _uiState.update { it.copy(selectedTab = index) }
     }
 
-    fun setChatFilter(filter: Int) {
-        _uiState.update { it.copy(chatFilter = filter) }
+    fun setChatFilter(index: Int) {
+        _uiState.update { it.copy(chatFilter = index) }
     }
 
     fun updateSearchQuery(query: String) {
         _uiState.update { it.copy(searchQuery = query) }
     }
+
+    fun setSearchQuery(query: String) = updateSearchQuery(query)
 
     fun setThemeMode(mode: AppThemeMode) {
         _uiState.update { it.copy(themeMode = mode) }
@@ -206,6 +261,9 @@ class BitChatViewModel(
 
     fun selectConversation(id: String) {
         _uiState.update { it.copy(activeConversationId = id) }
+        viewModelScope.launch {
+            chatDao.markConversationRead(id)
+        }
     }
 
     fun clearActiveConversation() {
@@ -228,14 +286,23 @@ class BitChatViewModel(
                 conversationId = convId,
                 text = text
             )
-            // Log to Off-Grid Mesh packet monitor
             val activeConv = repository.getConversation(convId)
-            val recipientTitle = activeConv?.title ?: "Peer Node"
-            meshManager.sendOffGridMessage(recipientTitle, text)
+            val recipient = activeConv?.peerPublicKey?.takeIf { it.contains(":") } ?: activeConv?.title ?: "Peer Node"
+            
+            if (activeConv?.type == ConversationType.GROUP) {
+                meshManager.broadcastGroupMessage(text)
+            } else {
+                meshManager.sendOffGridMessage(recipient, text)
+            }
         }
     }
 
-    // Mesh Network Operations
+    fun broadcastMeshGroupChat(text: String) {
+        viewModelScope.launch {
+            meshManager.broadcastGroupMessage(text)
+        }
+    }
+
     fun toggleMeshMode(enabled: Boolean) {
         meshManager.toggleMeshMode(enabled)
     }
@@ -250,127 +317,29 @@ class BitChatViewModel(
 
     fun startDirectChatWithMeshPeer(peer: MeshPeerNode) {
         viewModelScope.launch {
-            // Find or create conversation with this peer node
-            val existing = conversations.value.find { it.title.contains(peer.name.take(6), ignoreCase = true) }
-            if (existing != null) {
-                _uiState.update { it.copy(activeConversationId = existing.id) }
+            val allConvs = repository.allConversations.first()
+            val existing = allConvs.find { it.title.equals(peer.name, ignoreCase = true) || it.peerPublicKey == peer.id }
+            val convId = if (existing != null) {
+                existing.id
             } else {
-                // Create dedicated offline mesh conversation
-                val newConvId = "conv_mesh_${peer.id}"
                 val newConv = ConversationEntity(
-                    id = newConvId,
+                    id = "mesh_${UUID.randomUUID().toString().take(8)}",
                     type = ConversationType.DIRECT,
-                    title = "${peer.name} [Off-Grid Mesh]",
-                    peerPublicKey = peer.publicKey,
-                    avatarColorHex = "#2563EB",
+                    title = peer.name,
+                    peerPublicKey = peer.id,
+                    avatarColorHex = "#3B82F6",
                     avatarInitials = peer.name.take(2).uppercase(),
-                    lastMessageText = "Jalur direct P2P mesh aktif via ${peer.protocol} (0 KB Internet).",
+                    lastMessageText = "Koneksi Radio Mesh P2P siap (${peer.protocol})",
                     lastMessageTimestamp = System.currentTimeMillis(),
-                    isVerified = true,
-                    isOnline = true
+                    isVerified = true
                 )
                 repository.insertConversation(newConv)
-                _uiState.update { it.copy(activeConversationId = newConvId) }
+                newConv.id
             }
-        }
-    }
-
-    fun sendSosEmergency(message: String, coords: String) {
-        meshManager.broadcastSosEmergency(message, coords)
-    }
-
-    fun addCustomMeshNode(name: String, role: String, protocol: String) {
-        meshManager.triggerNewPeerDiscovery(name, role, protocol)
-    }
-
-    fun sendHighResImage(caption: String, isHighRes: Boolean) {
-        val convId = _uiState.value.activeConversationId ?: return
-        val sampleImages = listOf(
-            "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=1200&auto=format&fit=crop",
-            "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=1200&auto=format&fit=crop",
-            "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=1200&auto=format&fit=crop"
-        )
-        val selectedImage = sampleImages.random()
-        val sizeFormatted = if (isHighRes) "6.4 MB (HD Lossless Original)" else "420 KB (Standar)"
-
-        viewModelScope.launch {
-            repository.sendMessage(
-                conversationId = convId,
-                text = "",
-                mediaType = MediaType.IMAGE_HIGH_RES,
-                mediaUri = selectedImage,
-                mediaCaption = caption.ifEmpty { "Security_HD_Render_Original.png" },
-                mediaSizeFormatted = sizeFormatted,
-                isHighRes = isHighRes
-            )
-        }
-        _uiState.update { it.copy(isAttachmentSheetOpen = false) }
-    }
-
-    fun sendVoiceNote(durationSeconds: Int) {
-        val convId = _uiState.value.activeConversationId ?: return
-        viewModelScope.launch {
-            repository.sendMessage(
-                conversationId = convId,
-                text = "",
-                mediaType = MediaType.AUDIO_VOICE_NOTE,
-                mediaCaption = "Pesan Suara Terenkripsi",
-                mediaSizeFormatted = "${durationSeconds * 32} KB",
-                audioDuration = durationSeconds
-            )
-        }
-        _uiState.update { it.copy(isAttachmentSheetOpen = false) }
-    }
-
-    fun sendDocument(fileName: String, fileSize: String) {
-        val convId = _uiState.value.activeConversationId ?: return
-        viewModelScope.launch {
-            repository.sendMessage(
-                conversationId = convId,
-                text = "",
-                mediaType = MediaType.DOCUMENT,
-                mediaCaption = fileName,
-                mediaSizeFormatted = fileSize
-            )
-        }
-        _uiState.update { it.copy(isAttachmentSheetOpen = false) }
-    }
-
-    fun sendLocation() {
-        val convId = _uiState.value.activeConversationId ?: return
-        viewModelScope.launch {
-            repository.sendMessage(
-                conversationId = convId,
-                text = "",
-                mediaType = MediaType.SECURE_LOCATION,
-                mediaCaption = "Koordinat Lokasi Aman (-6.2088, 106.8456)",
-                mediaSizeFormatted = "GPS Encrypted"
-            )
-        }
-        _uiState.update { it.copy(isAttachmentSheetOpen = false) }
-    }
-
-    fun updateDisappearingTimer(seconds: Long) {
-        val convId = _uiState.value.activeConversationId ?: return
-        viewModelScope.launch {
-            repository.updateAutoDeleteTimer(convId, seconds)
-        }
-        _uiState.update { it.copy(isDisappearingTimerSheetOpen = false) }
-    }
-
-    fun toggleVerification(conversationId: String, isVerified: Boolean) {
-        viewModelScope.launch {
-            repository.toggleConversationVerification(conversationId, isVerified)
-        }
-    }
-
-    fun createGroup(title: String, description: String, selectedContactIds: List<String>, timerSeconds: Long) {
-        viewModelScope.launch {
-            val groupId = repository.createGroup(title, description, selectedContactIds, timerSeconds)
             _uiState.update {
                 it.copy(
-                    isCreateGroupDialogOpen = false,
-                    activeConversationId = groupId
+                    selectedTab = 0,
+                    activeConversationId = convId
                 )
             }
         }
@@ -381,17 +350,114 @@ class BitChatViewModel(
             val convId = repository.getOrCreateDirectConversationForContact(contact)
             _uiState.update {
                 it.copy(
-                    isCreateGroupDialogOpen = false,
-                    activeConversationId = convId
+                    selectedTab = 0,
+                    activeConversationId = convId,
+                    isCreateGroupDialogOpen = false
                 )
             }
         }
     }
 
-    fun addNewContactAndStartChat(name: String, username: String) {
+    fun sendSosEmergency(message: String, coords: String) {
         viewModelScope.launch {
-            val newContact = repository.addNewContact(name, username)
-            startDirectChatWithContact(newContact)
+            meshManager.broadcastSosEmergency(message, coords)
+        }
+    }
+
+    fun addCustomMeshNode(name: String, role: String, protocol: String) {
+        meshManager.triggerNewPeerDiscovery(name, role, protocol)
+    }
+
+    fun sendHighResImage(caption: String, isHighRes: Boolean) {
+        val convId = _uiState.value.activeConversationId ?: return
+        viewModelScope.launch {
+            repository.sendMessage(
+                conversationId = convId,
+                text = caption,
+                mediaType = MediaType.IMAGE_HIGH_RES,
+                mediaUri = "content://media/external/images/sample_${System.currentTimeMillis()}.jpg",
+                mediaCaption = caption.ifEmpty { "Foto Resolusi Penuh Tanpa Kompresi" },
+                mediaSizeFormatted = if (isHighRes) "14.8 MB (RAW)" else "4.2 MB (HD)",
+                isHighRes = isHighRes
+            )
+            _uiState.update { it.copy(isAttachmentSheetOpen = false) }
+        }
+    }
+
+    fun sendVoiceNote(durationSec: Int) {
+        val convId = _uiState.value.activeConversationId ?: return
+        viewModelScope.launch {
+            repository.sendMessage(
+                conversationId = convId,
+                text = "",
+                mediaType = MediaType.AUDIO_VOICE_NOTE,
+                mediaUri = "content://media/audio/voice_${System.currentTimeMillis()}.m4a",
+                mediaCaption = "Pesan Suara Terenkripsi",
+                mediaSizeFormatted = "${(durationSec * 32)} KB",
+                audioDuration = durationSec
+            )
+            _uiState.update { it.copy(isAttachmentSheetOpen = false) }
+        }
+    }
+
+    fun sendDocument(fileName: String, fileSize: String) {
+        val convId = _uiState.value.activeConversationId ?: return
+        viewModelScope.launch {
+            repository.sendMessage(
+                conversationId = convId,
+                text = fileName,
+                mediaType = MediaType.DOCUMENT,
+                mediaUri = "content://media/docs/$fileName",
+                mediaCaption = fileName,
+                mediaSizeFormatted = fileSize
+            )
+            _uiState.update { it.copy(isAttachmentSheetOpen = false) }
+        }
+    }
+
+    fun sendLocation() {
+        val convId = _uiState.value.activeConversationId ?: return
+        viewModelScope.launch {
+            repository.sendMessage(
+                conversationId = convId,
+                text = "📍 -6.2088, 106.8456 (Jakarta Pusat, ID)",
+                mediaType = MediaType.SECURE_LOCATION,
+                mediaCaption = "Koordinat Lokasi Aman GPS",
+                mediaSizeFormatted = "GPS Fix ±3m"
+            )
+            _uiState.update { it.copy(isAttachmentSheetOpen = false) }
+        }
+    }
+
+    fun createGroup(title: String, description: String, selectedContactIds: List<String>, autoDeleteDurationSeconds: Long) {
+        viewModelScope.launch {
+            val newId = repository.createGroup(
+                title = title,
+                description = description,
+                selectedContactIds = selectedContactIds,
+                autoDeleteDurationSeconds = autoDeleteDurationSeconds
+            )
+            _uiState.update {
+                it.copy(
+                    isCreateGroupDialogOpen = false,
+                    activeConversationId = newId
+                )
+            }
+        }
+    }
+
+    fun updateDisappearingTimer(durationSeconds: Long) {
+        val convId = _uiState.value.activeConversationId ?: return
+        viewModelScope.launch {
+            repository.updateAutoDeleteTimer(convId, durationSeconds)
+            _uiState.update { it.copy(isDisappearingTimerSheetOpen = false) }
+        }
+    }
+
+    fun toggleVerification(conversationId: String, verified: Boolean) {
+        viewModelScope.launch {
+            repository.toggleConversationVerification(conversationId, verified)
+            _uiState.update { it.copy(isSafetyNumberDialogOpen = false) }
         }
     }
 

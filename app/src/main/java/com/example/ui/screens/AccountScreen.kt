@@ -637,19 +637,6 @@ fun AccountScreen(
                     )
 
                     AccountSettingNavigationItem(
-                        icon = Icons.Default.Devices,
-                        title = "Perangkat Tertaut",
-                        subtitle = "Sinkronisasi Web, Desktop, & Tablet terenkripsi",
-                        isDarkTheme = isDark,
-                        onClick = onOpenLinkedDevices
-                    )
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                        color = if (isDark) Color(0xFF1E293B) else MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
-                    )
-
-                    AccountSettingNavigationItem(
                         icon = Icons.Default.Security,
                         title = "Log Audit Keamanan",
                         subtitle = "Pantau verifikasi kunci dan deteksi tamper",

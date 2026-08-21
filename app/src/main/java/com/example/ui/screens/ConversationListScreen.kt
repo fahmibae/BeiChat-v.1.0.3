@@ -182,9 +182,8 @@ fun ConversationListScreen(
                                 text = when (selectedTab) {
                                     0 -> "BeiChat"
                                     1 -> "Mesh P2P (Off-Grid)"
-                                    2 -> "Perangkat Tertaut"
-                                    3 -> "Pusat Keamanan"
-                                    4 -> "Akun Saya"
+                                    2 -> "Pusat Keamanan"
+                                    3 -> "Akun Saya"
                                     else -> "BeiChat"
                                 },
                                 style = MaterialTheme.typography.titleLarge,
@@ -438,34 +437,13 @@ fun ConversationListScreen(
                     modifier = Modifier.testTag("nav_offgrid")
                 )
 
-                // 2: Perangkat
+                // 2: Keamanan
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { onTabSelected(2) },
                     icon = {
                         Icon(
-                            imageVector = if (selectedTab == 2) Icons.Filled.Devices else Icons.Outlined.Devices,
-                            contentDescription = "Perangkat"
-                        )
-                    },
-                    label = { 
-                        Text(
-                            text = "Perangkat", 
-                            fontSize = 12.sp, 
-                            fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Medium 
-                        ) 
-                    },
-                    colors = navItemColors,
-                    modifier = Modifier.testTag("nav_devices")
-                )
-
-                // 3: Keamanan
-                NavigationBarItem(
-                    selected = selectedTab == 3,
-                    onClick = { onTabSelected(3) },
-                    icon = {
-                        Icon(
-                            imageVector = if (selectedTab == 3) Icons.Filled.Shield else Icons.Outlined.Shield,
+                            imageVector = if (selectedTab == 2) Icons.Filled.Shield else Icons.Outlined.Shield,
                             contentDescription = "Keamanan"
                         )
                     },
@@ -473,20 +451,20 @@ fun ConversationListScreen(
                         Text(
                             text = "Keamanan", 
                             fontSize = 12.sp, 
-                            fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Medium 
+                            fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Medium 
                         ) 
                     },
                     colors = navItemColors,
                     modifier = Modifier.testTag("nav_security")
                 )
 
-                // 4: Akun
+                // 3: Akun
                 NavigationBarItem(
-                    selected = selectedTab == 4,
-                    onClick = { onTabSelected(4) },
+                    selected = selectedTab == 3,
+                    onClick = { onTabSelected(3) },
                     icon = {
                         Icon(
-                            imageVector = if (selectedTab == 4) Icons.Filled.AccountCircle else Icons.Outlined.AccountCircle,
+                            imageVector = if (selectedTab == 3) Icons.Filled.AccountCircle else Icons.Outlined.AccountCircle,
                             contentDescription = "Akun"
                         )
                     },
@@ -494,7 +472,7 @@ fun ConversationListScreen(
                         Text(
                             text = "Akun", 
                             fontSize = 12.sp, 
-                            fontWeight = if (selectedTab == 4) FontWeight.Bold else FontWeight.Medium 
+                            fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Medium 
                         ) 
                     },
                     colors = navItemColors,
@@ -622,15 +600,6 @@ fun ConversationListScreen(
                     }
 
                     2 -> {
-                        // Linked Devices
-                        LinkedDevicesScreen(
-                            linkedDevices = linkedDevices,
-                            onOpenLinkDeviceDialog = onOpenLinkDevice,
-                            onRevokeDevice = onRevokeDevice
-                        )
-                    }
-
-                    3 -> {
                         // Security Center
                         SecurityCenterScreen(
                             isBiometricLockEnabled = isBiometricLockEnabled,
@@ -641,15 +610,15 @@ fun ConversationListScreen(
                         )
                     }
 
-                    4 -> {
+                    3 -> {
                         // Account Screen (Profil & Pengaturan Akun)
                         AccountScreen(
                             isBiometricLockEnabled = isBiometricLockEnabled,
                             isMeshModeActive = isMeshActive,
                             onToggleBiometricLock = onToggleBiometricLock,
                             onToggleMeshMode = onToggleMeshActive,
-                            onOpenLinkedDevices = { onTabSelected(2) },
-                            onOpenSecurityLogs = { onTabSelected(3) }
+                            onOpenLinkedDevices = { },
+                            onOpenSecurityLogs = { onTabSelected(2) }
                         )
                     }
                 }

@@ -19,8 +19,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -30,12 +33,12 @@ import java.util.UUID
 data class MeshPeerNode(
     val id: String,
     val name: String,
-    val role: String, // e.g. "Direct Peer", "Relay Node", "Field Unit", "Gateway"
+    val role: String,
     val publicKey: String,
     val distanceMeters: Int,
-    val rssi: Int, // e.g. -48 dBm
-    val hopCount: Int, // 1 = Direct BLE/Wi-Fi, 2 = 1-Hop Relay, 3 = Multi-Hop Mesh
-    val protocol: String, // "BLE Mesh 5.3", "Wi-Fi Direct P2P", "Ad-Hoc Radio"
+    val rssi: Int,
+    val hopCount: Int,
+    val protocol: String,
     val batteryLevel: Int = 100,
     val isConnected: Boolean = true,
     val lastSeenTimestamp: Long = System.currentTimeMillis(),
@@ -45,14 +48,14 @@ data class MeshPeerNode(
 
 data class MeshPacketLog(
     val id: String = UUID.randomUUID().toString().take(8),
-    val packetType: String, // "DIRECT_MSG", "MULTI_HOP_RELAY", "KEY_HANDSHAKE", "SOS_BEACON", "ACK"
+    val packetType: String,
     val originNode: String,
     val destinationNode: String,
     val hopRoute: List<String>,
     val payloadBytes: Int,
     val latencyMs: Int,
     val timestamp: Long = System.currentTimeMillis(),
-    val status: String // "DELIVERED_OFFGRID", "RELAYING", "BROADCASTED"
+    val status: String
 )
 
 data class MeshSosBroadcast(
@@ -68,7 +71,7 @@ data class MeshSosBroadcast(
 data class MeshStats(
     val totalPacketsRelayed: Int = 0,
     val activeMeshNodesCount: Int = 0,
-    val cellularDataUsedBytes: Long = 0L, // 0 Bytes! 100% Offline
+    val cellularDataUsedBytes: Long = 0L,
     val averageHopLatencyMs: Int = 0,
     val meshCoverageRadiusMeters: Int = 0,
     val encryptionStandard: String = "AES-256-GCM Direct-Over-Air"
@@ -96,9 +99,22 @@ class MeshNetworkManager private constructor(
     private val _meshStats = MutableStateFlow(MeshStats())
     val meshStats: StateFlow<MeshStats> = _meshStats.asStateFlow()
 
+    private val _incomingMeshMessages = MutableSharedFlow<RawMeshPayload>(extraBufferCapacity = 64)
+    val incomingMeshMessages: SharedFlow<RawMeshPayload> = _incomingMeshMessages.asSharedFlow()
+
     private var scanJob: Job? = null
 
-    // Bluetooth Services
+    private val socketEngine = BluetoothMeshSocketEngine(
+        context = context,
+        scope = scope,
+        onMessageReceived = { payload ->
+            handleIncomingSocketPayload(payload)
+        },
+        onNodeConnected = { device ->
+            handleDiscoveredBluetoothDevice(device, -40, "Bluetooth P2P Socket Terhubung")
+        }
+    )
+
     private val bluetoothAdapter: BluetoothAdapter? by lazy {
         try {
             val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -111,11 +127,9 @@ class MeshNetworkManager private constructor(
     private val bleScanner: BluetoothLeScanner?
         get() = try { bluetoothAdapter?.bluetoothLeScanner } catch (_: Exception) { null }
 
-    // Wi-Fi Direct P2P Services
     private var wifiP2pManager: WifiP2pManager? = null
     private var wifiP2pChannel: WifiP2pManager.Channel? = null
 
-    // Broadcast Receiver for Bluetooth Classic & Wi-Fi Direct
     private val radioReceiver = object : BroadcastReceiver() {
         @SuppressLint("MissingPermission")
         override fun onReceive(c: Context?, intent: Intent?) {
@@ -132,6 +146,7 @@ class MeshNetworkManager private constructor(
                     val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
                     if (state == BluetoothAdapter.STATE_ON) {
                         loadBondedDevices()
+                        socketEngine.startListening()
                         refreshScan()
                     }
                 }
@@ -148,7 +163,6 @@ class MeshNetworkManager private constructor(
         }
     }
 
-    // BLE Scan Callback
     private val bleScanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
@@ -174,6 +188,7 @@ class MeshNetworkManager private constructor(
         initWifiP2p()
         registerRadioReceivers()
         loadBondedDevices()
+        socketEngine.startListening()
         startMeshNetworkLoop()
     }
 
@@ -203,7 +218,7 @@ class MeshNetworkManager private constructor(
             if (adapter != null && adapter.isEnabled) {
                 val bonded = adapter.bondedDevices
                 bonded?.forEach { device ->
-                    handleDiscoveredBluetoothDevice(device, -50, "Bluetooth Terpasang (Bonded)")
+                    handleDiscoveredBluetoothDevice(device, -45, "Bluetooth Terpasang (Bonded)")
                 }
             }
         } catch (_: Exception) {}
@@ -216,7 +231,7 @@ class MeshNetworkManager private constructor(
             val deviceAddress = device.address ?: UUID.randomUUID().toString().take(8)
             val displayName = if (!rawName.isNullOrBlank()) rawName else "Node Bluetooth (${deviceAddress.takeLast(5)})"
 
-            val actualRssi = if (rssiInt in -120..0) rssiInt else -65
+            val actualRssi = if (rssiInt in -120..0) rssiInt else -60
             val approxDistance = when {
                 actualRssi > -55 -> (2..8).random()
                 actualRssi > -70 -> (8..20).random()
@@ -295,20 +310,52 @@ class MeshNetworkManager private constructor(
         } catch (_: Exception) {}
     }
 
+    private fun handleIncomingSocketPayload(payload: RawMeshPayload) {
+        scope.launch {
+            _incomingMeshMessages.emit(payload)
+
+            val log = MeshPacketLog(
+                id = payload.packetId,
+                packetType = if (payload.isBroadcast) "BROADCAST_CHAT" else "DIRECT_MSG",
+                originNode = payload.senderName,
+                destinationNode = if (payload.isBroadcast) "ALL_NODES" else "Perangkat Ini",
+                hopRoute = listOf(payload.senderName, "Perangkat Ini"),
+                payloadBytes = payload.messageText.toByteArray().size + 128,
+                latencyMs = (15..40).random(),
+                timestamp = payload.timestamp,
+                status = "DELIVERED_OFFGRID"
+            )
+
+            _packetLogs.update { listOf(log) + it.take(30) }
+            _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
+
+            if (payload.isBroadcast && payload.messageText.startsWith("[SOS]")) {
+                val sos = MeshSosBroadcast(
+                    id = payload.packetId,
+                    senderName = payload.senderName,
+                    locationCoords = "-6.2088, 106.8456",
+                    message = payload.messageText.removePrefix("[SOS]").trim(),
+                    severity = "CRITICAL",
+                    timestamp = payload.timestamp,
+                    hopsRelayed = 1
+                )
+                _sosAlerts.update { listOf(sos) + it }
+            }
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun refreshScan() {
         try {
             val adapter = bluetoothAdapter
             if (adapter != null && adapter.isEnabled) {
-                // 1. Bonded / Paired devices
                 loadBondedDevices()
+                socketEngine.startListening()
 
-                // 2. Classic Bluetooth Discovery
                 if (!adapter.isDiscovering) {
                     adapter.startDiscovery()
                 }
 
-                // 3. BLE Scan
                 bleScanner?.let { scanner ->
                     try {
                         scanner.stopScan(bleScanCallback)
@@ -317,7 +364,6 @@ class MeshNetworkManager private constructor(
                 }
             }
 
-            // 4. Wi-Fi Direct Peer Discovery
             wifiP2pManager?.let { manager ->
                 wifiP2pChannel?.let { channel ->
                     try {
@@ -339,7 +385,7 @@ class MeshNetworkManager private constructor(
                 if (_isMeshModeEnabled.value && _isRadarScanning.value) {
                     refreshScan()
                 }
-                delay(10000)
+                delay(12000)
             }
         }
     }
@@ -347,9 +393,11 @@ class MeshNetworkManager private constructor(
     fun toggleMeshMode(enabled: Boolean) {
         _isMeshModeEnabled.value = enabled
         if (enabled) {
+            socketEngine.startListening()
             startMeshNetworkLoop()
         } else {
             scanJob?.cancel()
+            socketEngine.stop()
             try {
                 bluetoothAdapter?.cancelDiscovery()
                 bleScanner?.stopScan(bleScanCallback)
@@ -378,6 +426,118 @@ class MeshNetworkManager private constructor(
         }
     }
 
+    @SuppressLint("MissingPermission")
+    fun sendOffGridMessage(recipientAddressOrName: String, content: String): MeshPacketLog {
+        val packetId = UUID.randomUUID().toString().take(8)
+        val myDeviceName = bluetoothAdapter?.name ?: "Saya"
+        val myAddress = bluetoothAdapter?.address ?: "ME"
+
+        val payload = RawMeshPayload(
+            packetId = packetId,
+            senderName = myDeviceName,
+            senderAddress = myAddress,
+            recipientAddress = recipientAddressOrName,
+            messageText = content,
+            timestamp = System.currentTimeMillis(),
+            isBroadcast = false
+        )
+
+        socketEngine.sendDirectMessage(recipientAddressOrName, payload)
+
+        val log = MeshPacketLog(
+            id = packetId,
+            packetType = "DIRECT_MSG",
+            originNode = "Saya ($myDeviceName)",
+            destinationNode = recipientAddressOrName,
+            hopRoute = listOf("Saya", recipientAddressOrName),
+            payloadBytes = content.toByteArray().size + 128,
+            latencyMs = (12..35).random(),
+            status = "DELIVERED_OFFGRID"
+        )
+
+        _packetLogs.update { listOf(log) + it.take(25) }
+        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
+        return log
+    }
+
+    @SuppressLint("MissingPermission")
+    fun broadcastSosEmergency(message: String, coords: String) {
+        val packetId = UUID.randomUUID().toString().take(8)
+        val myDeviceName = bluetoothAdapter?.name ?: "Saya"
+        val myAddress = bluetoothAdapter?.address ?: "ME"
+
+        val payload = RawMeshPayload(
+            packetId = packetId,
+            senderName = myDeviceName,
+            senderAddress = myAddress,
+            recipientAddress = "ALL",
+            messageText = "[SOS] $message (Coords: $coords)",
+            timestamp = System.currentTimeMillis(),
+            isBroadcast = true
+        )
+
+        socketEngine.broadcastToAll(payload)
+
+        val sos = MeshSosBroadcast(
+            id = packetId,
+            senderName = "Anda (Emergency Beacon)",
+            locationCoords = coords.ifEmpty { "-6.2088, 106.8456" },
+            message = message,
+            severity = "CRITICAL",
+            timestamp = System.currentTimeMillis(),
+            hopsRelayed = 1
+        )
+
+        _sosAlerts.update { listOf(sos) + it }
+
+        val log = MeshPacketLog(
+            id = packetId,
+            packetType = "SOS_BEACON",
+            originNode = "Saya ($myDeviceName)",
+            destinationNode = "ALL_SURROUNDING_NODES (Mesh Flood)",
+            hopRoute = listOf("Saya", "Broadcast Radio"),
+            payloadBytes = 512,
+            latencyMs = 8,
+            status = "BROADCASTED"
+        )
+
+        _packetLogs.update { listOf(log) + it.take(25) }
+        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun broadcastGroupMessage(content: String) {
+        val packetId = UUID.randomUUID().toString().take(8)
+        val myDeviceName = bluetoothAdapter?.name ?: "Saya"
+        val myAddress = bluetoothAdapter?.address ?: "ME"
+
+        val payload = RawMeshPayload(
+            packetId = packetId,
+            senderName = myDeviceName,
+            senderAddress = myAddress,
+            recipientAddress = "ALL",
+            messageText = content,
+            timestamp = System.currentTimeMillis(),
+            isBroadcast = true
+        )
+
+        socketEngine.broadcastToAll(payload)
+
+        val log = MeshPacketLog(
+            id = packetId,
+            packetType = "BROADCAST_CHAT",
+            originNode = "Saya ($myDeviceName)",
+            destinationNode = "GRUP_OFFGRID_SEKITAR",
+            hopRoute = listOf("Saya", "Mesh Flood RFCOMM"),
+            payloadBytes = content.toByteArray().size + 128,
+            latencyMs = 15,
+            status = "BROADCASTED"
+        )
+
+        _packetLogs.update { listOf(log) + it.take(25) }
+        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
+    }
+
     fun triggerNewPeerDiscovery(name: String, role: String, protocol: String) {
         val nodeId = "node_${UUID.randomUUID().toString().take(6)}"
         val newNode = MeshPeerNode(
@@ -395,74 +555,6 @@ class MeshNetworkManager private constructor(
             radarDistanceRatio = (20..75).random() / 100f
         )
         _activePeers.update { listOf(newNode) + it }
-
-        _packetLogs.update {
-            listOf(
-                MeshPacketLog(
-                    packetType = "DISCOVERY_BEACON",
-                    originNode = name,
-                    destinationNode = "Perangkat Ini",
-                    hopRoute = listOf(name, "Perangkat Ini"),
-                    payloadBytes = 128,
-                    latencyMs = (10..30).random(),
-                    status = "DELIVERED_OFFGRID"
-                )
-            ) + it.take(20)
-        }
-
-        _meshStats.update {
-            it.copy(
-                activeMeshNodesCount = _activePeers.value.size,
-                totalPacketsRelayed = it.totalPacketsRelayed + 1
-            )
-        }
-    }
-
-    fun sendOffGridMessage(recipientName: String, content: String): MeshPacketLog {
-        val hopRoute = listOf("Perangkat Ini", recipientName)
-
-        val log = MeshPacketLog(
-            packetType = "DIRECT_MSG",
-            originNode = "Perangkat Ini (Offline P2P)",
-            destinationNode = recipientName,
-            hopRoute = hopRoute,
-            payloadBytes = content.toByteArray().size + 128,
-            latencyMs = (12..45).random(),
-            status = "DELIVERED_OFFGRID"
-        )
-
-        _packetLogs.update { listOf(log) + it.take(25) }
-        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
-        return log
-    }
-
-    fun broadcastSosEmergency(message: String, coords: String) {
-        val sos = MeshSosBroadcast(
-            senderName = "Anda (Emergency Beacon)",
-            locationCoords = coords.ifEmpty { "-6.2088, 106.8456" },
-            message = message,
-            severity = "CRITICAL",
-            timestamp = System.currentTimeMillis(),
-            hopsRelayed = 1
-        )
-
-        _sosAlerts.update { listOf(sos) + it }
-
-        _packetLogs.update {
-            listOf(
-                MeshPacketLog(
-                    packetType = "SOS_BEACON",
-                    originNode = "Perangkat Ini (SOS)",
-                    destinationNode = "ALL_SURROUNDING_NODES (Mesh Flood)",
-                    hopRoute = listOf("Perangkat Ini", "Broadcast Radio"),
-                    payloadBytes = 512,
-                    latencyMs = 8,
-                    status = "BROADCASTED"
-                )
-            ) + it.take(25)
-        }
-
-        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
     }
 
     companion object {
