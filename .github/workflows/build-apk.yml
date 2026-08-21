@@ -23,22 +23,15 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Prepare Secrets Configuration Files
+      - name: Prepare Environment Files
         run: |
           touch .env
           touch .env.example
-          echo "# AI Studio Secrets" >> .env
-          echo "# AI Studio Secrets Example" >> .env.example
+          echo "APPLICATION_ID=com.aistudio.bitchat.qvxwzp" > .env
+          echo "APPLICATION_ID=com.aistudio.bitchat.qvxwzp" > .env.example
 
-      - name: Grant execute permission for gradlew
-        run: |
-          if [ ! -f "gradlew" ]; then
-            gradle wrapper
-          fi
-          chmod +x gradlew
-
-      - name: Build APK (Release & Debug)
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK as Artifact
         uses: actions/upload-artifact@v4
