@@ -1,0 +1,68 @@
+name: Build and Release Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Prepare Secrets Configuration Files
+        run: |
+          touch .env
+          touch .env.example
+          echo "# AI Studio Secrets" >> .env
+          echo "# AI Studio Secrets Example" >> .env.example
+
+      - name: Grant execute permission for gradlew
+        run: |
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
+
+      - name: Build APK (Release & Debug)
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeiChat-APK
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          tag_name: v1.0.3-${{ github.run_number }}
+          name: "BeiChat v1.0.3 (Build ${{ github.run_number }})"
+          body: |
+            ### 🚀 BeiChat v1.0.3 Release
+            - E2EE Encrypted Messaging
+            - Off-Grid Mesh P2P Networking
+            - Group Chats & HD Media
+            - Auto-Delete & App Security
+            
+            Unduh file `.apk` di bawah dan pasang langsung pada perangkat Android Anda.
+          files: app/build/outputs/apk/debug/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
