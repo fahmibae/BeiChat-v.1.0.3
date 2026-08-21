@@ -12,8 +12,25 @@ if [ ! -f .env.example ]; then
     echo "APPLICATION_ID=com.aistudio.bitchat.qvxwzp" > .env.example
 fi
 
-echo "[1/2] Mengompilasi project menjadi file APK..."
-gradle :app:assembleDebug
+echo "[1/2] Memeriksa Gradle dan mengompilasi project..."
+
+if command -v gradle &> /dev/null; then
+    gradle :app:assembleDebug
+elif [ -f "./gradlew" ]; then
+    chmod +x ./gradlew
+    ./gradlew :app:assembleDebug
+else
+    echo "==================================================="
+    echo "[PERINGATAN] Gradle belum terpasang di Linux Anda."
+    echo "Silakan install Gradle dengan menjalankan perintah berikut di terminal:"
+    echo ""
+    echo "  sudo apt update && sudo apt install -y gradle openjdk-17-jdk"
+    echo ""
+    echo "Setelah selesai diinstall, jalankan ulang:"
+    echo "  bash build_apk.sh"
+    echo "==================================================="
+    exit 1
+fi
 
 echo "==================================================="
 echo "[SUKSES] APK Berhasil dibuat!"
