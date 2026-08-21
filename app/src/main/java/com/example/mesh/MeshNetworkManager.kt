@@ -1,6 +1,19 @@
 package com.example.mesh
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.wifi.p2p.WifiP2pDevice
+import android.net.wifi.p2p.WifiP2pDeviceList
+import android.net.wifi.p2p.WifiP2pManager
 import com.example.crypto.CryptoManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +36,7 @@ data class MeshPeerNode(
     val rssi: Int, // e.g. -48 dBm
     val hopCount: Int, // 1 = Direct BLE/Wi-Fi, 2 = 1-Hop Relay, 3 = Multi-Hop Mesh
     val protocol: String, // "BLE Mesh 5.3", "Wi-Fi Direct P2P", "Ad-Hoc Radio"
-    val batteryLevel: Int,
+    val batteryLevel: Int = 100,
     val isConnected: Boolean = true,
     val lastSeenTimestamp: Long = System.currentTimeMillis(),
     val radarAngle: Float = 45f,
@@ -49,15 +62,15 @@ data class MeshSosBroadcast(
     val message: String,
     val severity: String = "CRITICAL",
     val timestamp: Long = System.currentTimeMillis(),
-    val hopsRelayed: Int = 2
+    val hopsRelayed: Int = 1
 )
 
 data class MeshStats(
-    val totalPacketsRelayed: Int = 142,
-    val activeMeshNodesCount: Int = 4,
+    val totalPacketsRelayed: Int = 0,
+    val activeMeshNodesCount: Int = 0,
     val cellularDataUsedBytes: Long = 0L, // 0 Bytes! 100% Offline
-    val averageHopLatencyMs: Int = 18,
-    val meshCoverageRadiusMeters: Int = 450,
+    val averageHopLatencyMs: Int = 0,
+    val meshCoverageRadiusMeters: Int = 0,
     val encryptionStandard: String = "AES-256-GCM Direct-Over-Air"
 )
 
@@ -83,128 +96,250 @@ class MeshNetworkManager private constructor(
     private val _meshStats = MutableStateFlow(MeshStats())
     val meshStats: StateFlow<MeshStats> = _meshStats.asStateFlow()
 
-    private var scanSimulationJob: Job? = null
+    private var scanJob: Job? = null
+
+    // Bluetooth Services
+    private val bluetoothAdapter: BluetoothAdapter? by lazy {
+        try {
+            val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            bluetoothManager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private val bleScanner: BluetoothLeScanner?
+        get() = try { bluetoothAdapter?.bluetoothLeScanner } catch (_: Exception) { null }
+
+    // Wi-Fi Direct P2P Services
+    private var wifiP2pManager: WifiP2pManager? = null
+    private var wifiP2pChannel: WifiP2pManager.Channel? = null
+
+    // Broadcast Receiver for Bluetooth Classic & Wi-Fi Direct
+    private val radioReceiver = object : BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        override fun onReceive(c: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            when (action) {
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    val rssi: Short = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE)
+                    if (device != null) {
+                        handleDiscoveredBluetoothDevice(device, rssi.toInt(), "Bluetooth Classic")
+                    }
+                }
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    if (state == BluetoothAdapter.STATE_ON) {
+                        loadBondedDevices()
+                        refreshScan()
+                    }
+                }
+                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
+                    try {
+                        wifiP2pManager?.requestPeers(wifiP2pChannel) { peersList: WifiP2pDeviceList? ->
+                            peersList?.deviceList?.forEach { p2pDevice ->
+                                handleDiscoveredWifiP2pDevice(p2pDevice)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    // BLE Scan Callback
+    private val bleScanCallback = object : ScanCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onScanResult(callbackType: Int, result: ScanResult?) {
+            super.onScanResult(callbackType, result)
+            val device = result?.device ?: return
+            val rssi = result.rssi
+            handleDiscoveredBluetoothDevice(device, rssi, "BLE Mesh 5.3")
+        }
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>?) {
+            super.onBatchScanResults(results)
+            results?.forEach { res ->
+                val device = res.device
+                val rssi = res.rssi
+                handleDiscoveredBluetoothDevice(device, rssi, "BLE Mesh 5.3")
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {}
+    }
 
     init {
-        seedInitialMeshPeers()
+        initWifiP2p()
+        registerRadioReceivers()
+        loadBondedDevices()
         startMeshNetworkLoop()
     }
 
-    private fun seedInitialMeshPeers() {
-        val initialNodes = listOf(
-            MeshPeerNode(
-                id = "node_radit_01",
-                name = "Raditya Pratama",
-                role = "Direct Peer (10m)",
-                publicKey = CryptoManager.generateKeyPair().first,
-                distanceMeters = 8,
-                rssi = -46,
-                hopCount = 1,
-                protocol = "BLE Mesh 5.3 (High Speed)",
-                batteryLevel = 88,
-                isConnected = true,
-                radarAngle = 45f,
-                radarDistanceRatio = 0.28f
-            ),
-            MeshPeerNode(
-                id = "node_sarah_02",
-                name = "Sarah Chen",
-                role = "Wi-Fi Direct Node",
-                publicKey = CryptoManager.generateKeyPair().first,
-                distanceMeters = 24,
-                rssi = -64,
-                hopCount = 1,
-                protocol = "Wi-Fi Direct P2P (Lossless)",
-                batteryLevel = 92,
-                isConnected = true,
-                radarAngle = 135f,
-                radarDistanceRatio = 0.52f
-            ),
-            MeshPeerNode(
-                id = "node_bima_relay",
-                name = "Bima Satria (Relay)",
-                role = "Multi-Hop Relay Node",
-                publicKey = CryptoManager.generateKeyPair().first,
-                distanceMeters = 85,
-                rssi = -78,
-                hopCount = 2,
-                protocol = "Ad-Hoc Mesh Relay",
-                batteryLevel = 74,
-                isConnected = true,
-                radarAngle = 225f,
-                radarDistanceRatio = 0.75f
-            ),
-            MeshPeerNode(
-                id = "node_rescue_alpha",
-                name = "Posko Darurat Alpha",
-                role = "Mesh Base Station",
-                publicKey = CryptoManager.generateKeyPair().first,
-                distanceMeters = 160,
-                rssi = -86,
-                hopCount = 3,
-                protocol = "Off-Grid LoRa/BLE Bridge",
-                batteryLevel = 99,
-                isConnected = true,
-                radarAngle = 310f,
-                radarDistanceRatio = 0.88f
-            )
-        )
-        _activePeers.value = initialNodes
-
-        _packetLogs.value = listOf(
-            MeshPacketLog(
-                packetType = "KEY_HANDSHAKE",
-                originNode = "Local Device",
-                destinationNode = "Raditya Pratama",
-                hopRoute = listOf("Local", "Raditya"),
-                payloadBytes = 256,
-                latencyMs = 12,
-                status = "DELIVERED_OFFGRID"
-            ),
-            MeshPacketLog(
-                packetType = "MULTI_HOP_RELAY",
-                originNode = "Sarah Chen",
-                destinationNode = "Posko Darurat Alpha",
-                hopRoute = listOf("Sarah", "Bima Relay", "Posko Alpha"),
-                payloadBytes = 1024,
-                latencyMs = 38,
-                status = "DELIVERED_OFFGRID"
-            )
-        )
-
-        _sosAlerts.value = listOf(
-            MeshSosBroadcast(
-                senderName = "Tim Lapangan Sektor 3",
-                locationCoords = "-6.2088, 106.8456",
-                message = "Mode Off-Grid Aktif: Jalur komunikasi lokal terhubung via 3 node mesh tanpa pulsa & internet.",
-                severity = "INFO",
-                hopsRelayed = 2
-            )
-        )
+    private fun initWifiP2p() {
+        try {
+            wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
+            wifiP2pChannel = wifiP2pManager?.initialize(context, context.mainLooper, null)
+        } catch (_: Exception) {}
     }
 
-    private fun startMeshNetworkLoop() {
-        scanSimulationJob?.cancel()
-        scanSimulationJob = scope.launch(Dispatchers.Default) {
-            while (isActive) {
-                delay(4000)
-                if (_isMeshModeEnabled.value) {
-                    // Periodically update RSSI fluctuation to simulate real-world radio signals
-                    _activePeers.update { current ->
-                        current.map { peer ->
-                            val deltaRssi = (-2..2).random()
-                            val newRssi = (peer.rssi + deltaRssi).coerceIn(-95, -35)
-                            peer.copy(rssi = newRssi, lastSeenTimestamp = System.currentTimeMillis())
-                        }
-                    }
+    private fun registerRadioReceivers() {
+        try {
+            val filter = IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+                addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
+            }
+            context.registerReceiver(radioReceiver, filter)
+        } catch (_: Exception) {}
+    }
 
-                    _meshStats.update {
-                        it.copy(
-                            totalPacketsRelayed = it.totalPacketsRelayed + (1..3).random(),
-                            activeMeshNodesCount = _activePeers.value.size
-                        )
-                    }
+    @SuppressLint("MissingPermission")
+    fun loadBondedDevices() {
+        try {
+            val adapter = bluetoothAdapter
+            if (adapter != null && adapter.isEnabled) {
+                val bonded = adapter.bondedDevices
+                bonded?.forEach { device ->
+                    handleDiscoveredBluetoothDevice(device, -50, "Bluetooth Terpasang (Bonded)")
                 }
+            }
+        } catch (_: Exception) {}
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleDiscoveredBluetoothDevice(device: BluetoothDevice, rssiInt: Int, protocolDesc: String) {
+        try {
+            val rawName = try { device.name } catch (_: Exception) { null }
+            val deviceAddress = device.address ?: UUID.randomUUID().toString().take(8)
+            val displayName = if (!rawName.isNullOrBlank()) rawName else "Node Bluetooth (${deviceAddress.takeLast(5)})"
+
+            val actualRssi = if (rssiInt in -120..0) rssiInt else -65
+            val approxDistance = when {
+                actualRssi > -55 -> (2..8).random()
+                actualRssi > -70 -> (8..20).random()
+                actualRssi > -85 -> (20..50).random()
+                else -> (50..100).random()
+            }
+
+            val angle = (Math.abs(deviceAddress.hashCode()) % 360).toFloat()
+            val distRatio = (approxDistance.toFloat() / 120f).coerceIn(0.15f, 0.9f)
+
+            val discoveredNode = MeshPeerNode(
+                id = deviceAddress,
+                name = displayName,
+                role = "Direct Peer ($protocolDesc)",
+                publicKey = CryptoManager.generateHexFingerprint("PUBKEY_$deviceAddress"),
+                distanceMeters = approxDistance,
+                rssi = actualRssi,
+                hopCount = 1,
+                protocol = protocolDesc,
+                batteryLevel = 100,
+                isConnected = true,
+                radarAngle = angle,
+                radarDistanceRatio = distRatio
+            )
+
+            _activePeers.update { current ->
+                val withoutCurrent = current.filter { it.id != deviceAddress }
+                listOf(discoveredNode) + withoutCurrent
+            }
+
+            _meshStats.update {
+                it.copy(
+                    activeMeshNodesCount = _activePeers.value.size,
+                    meshCoverageRadiusMeters = maxOf(it.meshCoverageRadiusMeters, approxDistance * 2)
+                )
+            }
+        } catch (_: Exception) {}
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleDiscoveredWifiP2pDevice(device: WifiP2pDevice) {
+        try {
+            val deviceAddress = device.deviceAddress ?: UUID.randomUUID().toString().take(8)
+            val displayName = if (!device.deviceName.isNullOrBlank()) device.deviceName else "Wi-Fi Direct Peer (${deviceAddress.takeLast(5)})"
+
+            val approxDistance = (3..25).random()
+            val angle = (Math.abs(deviceAddress.hashCode()) % 360).toFloat()
+            val distRatio = (approxDistance.toFloat() / 100f).coerceIn(0.15f, 0.85f)
+
+            val discoveredNode = MeshPeerNode(
+                id = deviceAddress,
+                name = displayName,
+                role = "Wi-Fi Direct High-Speed Peer",
+                publicKey = CryptoManager.generateHexFingerprint("WIFIP2P_$deviceAddress"),
+                distanceMeters = approxDistance,
+                rssi = -48,
+                hopCount = 1,
+                protocol = "Wi-Fi Direct P2P 5GHz/2.4GHz",
+                batteryLevel = 100,
+                isConnected = true,
+                radarAngle = angle,
+                radarDistanceRatio = distRatio
+            )
+
+            _activePeers.update { current ->
+                val withoutCurrent = current.filter { it.id != deviceAddress }
+                listOf(discoveredNode) + withoutCurrent
+            }
+
+            _meshStats.update {
+                it.copy(
+                    activeMeshNodesCount = _activePeers.value.size,
+                    meshCoverageRadiusMeters = maxOf(it.meshCoverageRadiusMeters, approxDistance * 2)
+                )
+            }
+        } catch (_: Exception) {}
+    }
+
+    @SuppressLint("MissingPermission")
+    fun refreshScan() {
+        try {
+            val adapter = bluetoothAdapter
+            if (adapter != null && adapter.isEnabled) {
+                // 1. Bonded / Paired devices
+                loadBondedDevices()
+
+                // 2. Classic Bluetooth Discovery
+                if (!adapter.isDiscovering) {
+                    adapter.startDiscovery()
+                }
+
+                // 3. BLE Scan
+                bleScanner?.let { scanner ->
+                    try {
+                        scanner.stopScan(bleScanCallback)
+                        scanner.startScan(bleScanCallback)
+                    } catch (_: Exception) {}
+                }
+            }
+
+            // 4. Wi-Fi Direct Peer Discovery
+            wifiP2pManager?.let { manager ->
+                wifiP2pChannel?.let { channel ->
+                    try {
+                        manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() {}
+                            override fun onFailure(reason: Int) {}
+                        })
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startMeshNetworkLoop() {
+        scanJob?.cancel()
+        scanJob = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                if (_isMeshModeEnabled.value && _isRadarScanning.value) {
+                    refreshScan()
+                }
+                delay(10000)
             }
         }
     }
@@ -214,54 +349,81 @@ class MeshNetworkManager private constructor(
         if (enabled) {
             startMeshNetworkLoop()
         } else {
-            scanSimulationJob?.cancel()
+            scanJob?.cancel()
+            try {
+                bluetoothAdapter?.cancelDiscovery()
+                bleScanner?.stopScan(bleScanCallback)
+                wifiP2pManager?.let { manager ->
+                    wifiP2pChannel?.let { channel ->
+                        manager.stopPeerDiscovery(channel, null)
+                    }
+                }
+            } catch (_: Exception) {}
+            _activePeers.value = emptyList()
+            _meshStats.update { it.copy(activeMeshNodesCount = 0) }
         }
     }
 
+    @SuppressLint("MissingPermission")
     fun toggleRadarScan() {
-        _isRadarScanning.value = !_isRadarScanning.value
+        val newState = !_isRadarScanning.value
+        _isRadarScanning.value = newState
+        if (newState) {
+            refreshScan()
+        } else {
+            try {
+                bluetoothAdapter?.cancelDiscovery()
+                bleScanner?.stopScan(bleScanCallback)
+            } catch (_: Exception) {}
+        }
     }
 
     fun triggerNewPeerDiscovery(name: String, role: String, protocol: String) {
+        val nodeId = "node_${UUID.randomUUID().toString().take(6)}"
         val newNode = MeshPeerNode(
-            id = "node_${UUID.randomUUID().toString().take(6)}",
+            id = nodeId,
             name = name,
             role = role,
             publicKey = CryptoManager.generateKeyPair().first,
-            distanceMeters = (5..60).random(),
-            rssi = (-75..-40).random(),
-            hopCount = (1..2).random(),
+            distanceMeters = (5..35).random(),
+            rssi = (-70..-45).random(),
+            hopCount = 1,
             protocol = protocol,
-            batteryLevel = (60..98).random(),
+            batteryLevel = (75..100).random(),
             isConnected = true,
             radarAngle = (0..360).random().toFloat(),
-            radarDistanceRatio = (20..80).random() / 100f
+            radarDistanceRatio = (20..75).random() / 100f
         )
         _activePeers.update { listOf(newNode) + it }
 
-        // Add log
         _packetLogs.update {
             listOf(
                 MeshPacketLog(
                     packetType = "DISCOVERY_BEACON",
                     originNode = name,
-                    destinationNode = "Local Device",
-                    hopRoute = listOf(name, "Local Device"),
+                    destinationNode = "Perangkat Ini",
+                    hopRoute = listOf(name, "Perangkat Ini"),
                     payloadBytes = 128,
                     latencyMs = (10..30).random(),
                     status = "DELIVERED_OFFGRID"
                 )
             ) + it.take(20)
         }
+
+        _meshStats.update {
+            it.copy(
+                activeMeshNodesCount = _activePeers.value.size,
+                totalPacketsRelayed = it.totalPacketsRelayed + 1
+            )
+        }
     }
 
     fun sendOffGridMessage(recipientName: String, content: String): MeshPacketLog {
-        val hopCount = if (recipientName.contains("Relay", ignoreCase = true) || recipientName.contains("Alpha", ignoreCase = true)) 2 else 1
-        val hopRoute = if (hopCount == 1) listOf("Local Device", recipientName) else listOf("Local Device", "Bima Relay", recipientName)
+        val hopRoute = listOf("Perangkat Ini", recipientName)
 
         val log = MeshPacketLog(
             packetType = "DIRECT_MSG",
-            originNode = "Local Device (Offline P2P)",
+            originNode = "Perangkat Ini (Offline P2P)",
             destinationNode = recipientName,
             hopRoute = hopRoute,
             payloadBytes = content.toByteArray().size + 128,
@@ -281,7 +443,7 @@ class MeshNetworkManager private constructor(
             message = message,
             severity = "CRITICAL",
             timestamp = System.currentTimeMillis(),
-            hopsRelayed = 3
+            hopsRelayed = 1
         )
 
         _sosAlerts.update { listOf(sos) + it }
@@ -290,9 +452,9 @@ class MeshNetworkManager private constructor(
             listOf(
                 MeshPacketLog(
                     packetType = "SOS_BEACON",
-                    originNode = "Local Device (SOS)",
+                    originNode = "Perangkat Ini (SOS)",
                     destinationNode = "ALL_SURROUNDING_NODES (Mesh Flood)",
-                    hopRoute = listOf("Local", "Raditya", "Sarah", "Bima Relay", "Posko Alpha"),
+                    hopRoute = listOf("Perangkat Ini", "Broadcast Radio"),
                     payloadBytes = 512,
                     latencyMs = 8,
                     status = "BROADCASTED"
@@ -300,7 +462,7 @@ class MeshNetworkManager private constructor(
             ) + it.take(25)
         }
 
-        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 5) }
+        _meshStats.update { it.copy(totalPacketsRelayed = it.totalPacketsRelayed + 1) }
     }
 
     companion object {

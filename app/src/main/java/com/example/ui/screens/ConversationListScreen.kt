@@ -147,6 +147,7 @@ fun ConversationListScreen(
     onEmergencyPanicWipe: () -> Unit,
     onToggleMeshActive: (Boolean) -> Unit,
     onToggleRadarScan: () -> Unit,
+    onRefreshRadarScan: () -> Unit = {},
     onDirectChatWithPeer: (MeshPeerNode) -> Unit,
     onSendSosEmergency: (String, String) -> Unit,
     onAddCustomNode: (String, String, String) -> Unit
@@ -613,6 +614,7 @@ fun ConversationListScreen(
                             meshStats = meshStats,
                             onToggleMeshActive = onToggleMeshActive,
                             onToggleRadarScan = onToggleRadarScan,
+                            onRefreshRadarScan = onRefreshRadarScan,
                             onDirectChatWithPeer = onDirectChatWithPeer,
                             onSendSosEmergency = onSendSosEmergency,
                             onAddCustomNode = onAddCustomNode

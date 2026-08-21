@@ -244,6 +244,10 @@ class BitChatViewModel(
         meshManager.toggleRadarScan()
     }
 
+    fun refreshRadarScan() {
+        meshManager.refreshScan()
+    }
+
     fun startDirectChatWithMeshPeer(peer: MeshPeerNode) {
         viewModelScope.launch {
             // Find or create conversation with this peer node

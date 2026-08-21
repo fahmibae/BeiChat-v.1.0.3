@@ -35,7 +35,6 @@ class BitChatRepository(
     init {
         // Start background auto-delete cleaner loop
         appScope.launch(Dispatchers.IO) {
-            initializeSampleDataIfEmpty()
             startAutoDeleteCleanerLoop()
         }
     }

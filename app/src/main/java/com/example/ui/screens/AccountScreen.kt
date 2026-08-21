@@ -88,6 +88,45 @@ import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Palette
 import com.example.ui.viewmodel.AppThemeMode
 
+import androidx.compose.ui.platform.LocalContext
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.os.Build
+import android.provider.Settings
+
+private fun getDeviceInitialName(context: Context): String {
+    val prefs = context.getSharedPreferences("bitchat_profile", Context.MODE_PRIVATE)
+    val savedName = prefs.getString("user_display_name", null)
+    if (!savedName.isNullOrBlank()) return savedName
+
+    // 1. Try Bluetooth Adapter name
+    try {
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val btAdapter = bluetoothManager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
+        val btName = btAdapter?.name
+        if (!btName.isNullOrBlank()) {
+            return btName
+        }
+    } catch (_: Exception) {}
+
+    // 2. Try Settings device name
+    try {
+        val devName = Settings.Global.getString(context.contentResolver, "device_name")
+        if (!devName.isNullOrBlank()) return devName
+    } catch (_: Exception) {}
+
+    try {
+        val btName = Settings.Secure.getString(context.contentResolver, "bluetooth_name")
+        if (!btName.isNullOrBlank()) return btName
+    } catch (_: Exception) {}
+
+    // 3. Fallback to Android Device Model
+    val model = Build.MODEL ?: "Android Device"
+    val manufacturer = Build.MANUFACTURER?.replaceFirstChar { it.uppercase() } ?: ""
+    return if (manufacturer.isNotEmpty() && !model.startsWith(manufacturer, ignoreCase = true)) "$manufacturer $model" else model
+}
+
 @Composable
 fun AccountScreen(
     isBiometricLockEnabled: Boolean,
@@ -97,10 +136,22 @@ fun AccountScreen(
     onOpenLinkedDevices: () -> Unit,
     onOpenSecurityLogs: () -> Unit
 ) {
-    var userName by remember { mutableStateOf("Nudin Fahmi") }
-    var userStatus by remember { mutableStateOf("Tersedia • Enkripsi E2EE & Mesh P2P Aktif 🔒") }
-    var userPhone by remember { mutableStateOf("+62 812-8923-4410") }
-    var userHandle by remember { mutableStateOf("@nudin_mesh") }
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("bitchat_profile", Context.MODE_PRIVATE) }
+
+    var userName by remember {
+        mutableStateOf(prefs.getString("user_display_name", null) ?: getDeviceInitialName(context))
+    }
+    var userStatus by remember {
+        mutableStateOf(prefs.getString("user_status", null) ?: "Tersedia • Enkripsi E2EE & Mesh P2P Aktif 🔒")
+    }
+    var userPhone by remember {
+        mutableStateOf(prefs.getString("user_phone", null) ?: "P2P Mesh Node (Bebas Server & Pulsa)")
+    }
+    var userHandle by remember(userName) {
+        val cleanName = userName.filter { it.isLetterOrDigit() }.lowercase().ifEmpty { "node" }
+        mutableStateOf("@${cleanName}_p2p")
+    }
 
     var isEditProfileDialogOpen by remember { mutableStateOf(false) }
     var isQrDialogOpen by remember { mutableStateOf(false) }
@@ -111,7 +162,7 @@ fun AccountScreen(
 
     val clipboardManager = LocalClipboardManager.current
     val identityKeyFingerprint = remember {
-        CryptoManager.generateHexFingerprint("BITCHAT_MASTER_IDENTITY_KEY_NUDIN").chunked(4).take(8).joinToString(" ")
+        CryptoManager.localUserPublicKey.chunked(4).take(8).joinToString(" ")
     }
 
     val isDark = isSystemInDarkTheme()
@@ -691,6 +742,11 @@ fun AccountScreen(
                         userName = editName
                         userStatus = editStatus
                         userPhone = editPhone
+                        prefs.edit()
+                            .putString("user_display_name", editName)
+                            .putString("user_status", editStatus)
+                            .putString("user_phone", editPhone)
+                            .apply()
                         isEditProfileDialogOpen = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = SleekBluePrimary)
@@ -730,7 +786,7 @@ fun AccountScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    // Mock QR Box
+                    // Production Identity QR Box
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = Color.White,

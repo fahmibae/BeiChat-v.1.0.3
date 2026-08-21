@@ -1,10 +1,14 @@
 package com.example
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -14,8 +18,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import com.example.data.model.MessageEntity
 import com.example.ui.dialogs.AttachmentSheet
@@ -56,6 +62,32 @@ class MainActivity : ComponentActivity() {
 fun BitChatApp(
     viewModel: BitChatViewModel
 ) {
+    // Request Bluetooth and Location / Nearby Wi-Fi permissions for Off-Grid Radio
+    val requiredPermissions = remember {
+        buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_SCAN)
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+                add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            }
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }.toTypedArray()
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        viewModel.refreshRadarScan()
+    }
+
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(requiredPermissions)
+    }
+
     val conversations by viewModel.conversations.collectAsState()
     val activeConversation by viewModel.activeConversation.collectAsState()
     val activeMessages by viewModel.activeMessages.collectAsState()
@@ -138,6 +170,7 @@ fun BitChatApp(
                         onEmergencyPanicWipe = { viewModel.triggerEmergencyPanicWipe() },
                         onToggleMeshActive = { enabled -> viewModel.toggleMeshMode(enabled) },
                         onToggleRadarScan = { viewModel.toggleRadarScan() },
+                        onRefreshRadarScan = { viewModel.refreshRadarScan() },
                         onDirectChatWithPeer = { peer -> viewModel.startDirectChatWithMeshPeer(peer) },
                         onSendSosEmergency = { msg, coords -> viewModel.sendSosEmergency(msg, coords) },
                         onAddCustomNode = { name, role, proto -> viewModel.addCustomMeshNode(name, role, proto) }

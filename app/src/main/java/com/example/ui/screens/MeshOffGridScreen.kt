@@ -107,6 +107,7 @@ fun MeshOffGridScreen(
     meshStats: MeshStats,
     onToggleMeshActive: (Boolean) -> Unit,
     onToggleRadarScan: () -> Unit,
+    onRefreshRadarScan: () -> Unit = {},
     onDirectChatWithPeer: (MeshPeerNode) -> Unit,
     onSendSosEmergency: (String, String) -> Unit,
     onAddCustomNode: (String, String, String) -> Unit
@@ -302,12 +303,15 @@ fun MeshOffGridScreen(
 
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     IconButton(
-                                        onClick = onToggleRadarScan,
+                                        onClick = {
+                                            onToggleRadarScan()
+                                            onRefreshRadarScan()
+                                        },
                                         modifier = Modifier.size(34.dp)
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Refresh,
-                                            contentDescription = "Scan",
+                                            contentDescription = "Pindai Ulang Radio",
                                             tint = SleekBluePrimary,
                                             modifier = Modifier.size(18.dp)
                                         )
@@ -389,11 +393,63 @@ fun MeshOffGridScreen(
                     }
                 }
 
-                items(activePeers, key = { it.id }) { peer ->
-                    MeshPeerCardItem(
-                        peer = peer,
-                        onChatClick = { onDirectChatWithPeer(peer) }
-                    )
+                if (activePeers.isEmpty()) {
+                    item {
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Sensors,
+                                    contentDescription = null,
+                                    tint = SleekBluePrimary,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "Belum Ada Node Terdeteksi",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Radar terus mencari sinyal Bluetooth (BLE & Classic) serta Wi-Fi Direct P2P di sekitar Anda.\n\nTips: Pastikan Bluetooth & Lokasi (GPS) aktif di HP Anda, dan perangkat tujuan berada dalam jarak jangkau radio (~10-50 meter).",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(
+                                    onClick = onRefreshRadarScan,
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = SleekBluePrimary)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Pindai Sinyal Sekarang", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    items(activePeers, key = { it.id }) { peer ->
+                        MeshPeerCardItem(
+                            peer = peer,
+                            onChatClick = { onDirectChatWithPeer(peer) }
+                        )
+                    }
                 }
             }
 
@@ -473,77 +529,100 @@ fun MeshOffGridScreen(
                     )
                 }
 
-                items(sosAlerts, key = { it.id }) { alert ->
-                    Card(
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, SecurityShieldRed.copy(alpha = 0.4f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                if (sosAlerts.isEmpty()) {
+                    item {
+                        Card(
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.NearMe,
-                                        contentDescription = null,
-                                        tint = SecurityShieldRed,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = alert.senderName,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = SecurityShieldRed.copy(alpha = 0.15f)
-                                ) {
-                                    Text(
-                                        text = "${alert.hopsRelayed} Hop Relay",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SecurityShieldRed,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Text(
-                                text = alert.message,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                lineHeight = 18.sp
-                            )
-
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.LocationOn,
-                                    contentDescription = null,
-                                    tint = SleekBluePrimary,
-                                    modifier = Modifier.size(12.dp)
-                                )
                                 Text(
-                                    text = "Koordinat: ${alert.locationCoords} (GPS Offline)",
-                                    fontSize = 10.sp,
+                                    text = "Tidak ada peringatan SOS aktif.",
+                                    fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            }
+                        }
+                    }
+                } else {
+                    items(sosAlerts, key = { it.id }) { alert ->
+                        Card(
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SecurityShieldRed.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.NearMe,
+                                            contentDescription = null,
+                                            tint = SecurityShieldRed,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = alert.senderName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = SecurityShieldRed.copy(alpha = 0.15f)
+                                    ) {
+                                        Text(
+                                            text = "${alert.hopsRelayed} Hop Relay",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = SecurityShieldRed,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                Text(
+                                    text = alert.message,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    lineHeight = 18.sp
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.LocationOn,
+                                        contentDescription = null,
+                                        tint = SleekBluePrimary,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Text(
+                                        text = "Koordinat: ${alert.locationCoords} (GPS Offline)",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
@@ -562,7 +641,29 @@ fun MeshOffGridScreen(
                     )
                 }
 
-                items(packetLogs, key = { it.id }) { log ->
+                if (packetLogs.isEmpty()) {
+                    item {
+                        Card(
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Belum ada transmisi paket radio.",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    items(packetLogs, key = { it.id }) { log ->
                     Card(
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -631,6 +732,7 @@ fun MeshOffGridScreen(
             }
         }
     }
+}
 
     // SOS Emergency Dialog
     if (showSosDialog) {
