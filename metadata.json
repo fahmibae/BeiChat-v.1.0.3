@@ -1,0 +1,6 @@
+{
+  "name": "BeiChat",
+  "description": "Aplikasi pesan terenkripsi E2EE dengan teknologi Mesh P2P Off-Grid (chat tanpa internet), obrolan grup, media HD, auto-delete message, dan multi-device sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
